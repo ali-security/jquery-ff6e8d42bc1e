@@ -1,0 +1,97 @@
+name: build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dist inside node 0.10 container
+        run: |
+          set -e
+          docker run --rm -v "$PWD":/w -w /w node:0.10-wheezy /bin/bash -c '
+            set -e
+            npm config set registry https://:2014-05-01T18%3A05%3A32.863Z@time-machines-npm.sealsecurity.io/
+            npm config set strict-ssl false
+            node --version
+            npm --version
+            npm install
+            ./node_modules/.bin/grunt "build:*:*" uglify
+          '
+
+      - name: Generate dist/cdn copies
+        run: |
+          set -e
+          mkdir -p dist/cdn || { sudo mkdir -p dist/cdn && sudo chown "$USER" dist/cdn; }
+          python3 - <<'PY'
+          import os
+
+          SRC = "dist"
+          CDN = os.path.join(SRC, "cdn")
+
+          def read(name):
+              with open(os.path.join(SRC, name), "rb") as fh:
+                  return fh.read()
+
+          def write(name, data):
+              with open(os.path.join(CDN, name), "wb") as fh:
+                  fh.write(data)
+
+          js = read("jquery.js")
+          for name in ("jquery.js", "jquery-1.11.1.js", "jquery-latest.js"):
+              write(name, js)
+
+          min_js = read("jquery.min.js")
+          marker = b"//# sourceMappingURL=jquery.min.map"
+          assert marker in min_js, "sourceMappingURL comment missing from dist/jquery.min.js"
+          stripped = min_js.replace(marker, b"")
+          for name in ("jquery.min.js", "jquery-1.11.1.min.js", "jquery-latest.min.js"):
+              write(name, stripped)
+
+          min_map = read("jquery.min.map")
+          write("jquery.min.map", min_map)
+
+          old_file = b'"file":"jquery.min.js"'
+          old_sources = b'"sources":["jquery.js"]'
+          assert old_file in min_map, 'file field missing from dist/jquery.min.map'
+          assert old_sources in min_map, 'sources field missing from dist/jquery.min.map'
+          for label in ("jquery-1.11.1", "jquery-latest"):
+              out = min_map.replace(old_file, b'"file":"' + label.encode() + b'.min.js"')
+              out = out.replace(old_sources, b'"sources":["' + label.encode() + b'.js"]')
+              write(label + ".min.map", out)
+          PY
+          ls -l dist/cdn
+
+      - name: Remove workflow directory before packing
+        run: |
+          set -e
+          rm -rf .github
+
+      # npm 1.2.25 cannot pack here: its ancient fstream/mkdirp stages the
+      # package through /root/tmp and races on the modern host kernel/overlayfs,
+      # crashing with "npm ERR! EEXIST, mkdir '/root/tmp/npm-1/<rand>/package'".
+      # That is an environment incompatibility, not a tree problem, and it is
+      # not retry-able, so we pack with the image's bundled npm 2.15.1 instead.
+      # The workspace is mounted at /w/package (last path component "package")
+      # because npm 2.x names tarball members after the packed directory; the
+      # published jquery-1.11.1.tgz carries the "package/" prefix, and without
+      # this mount path the members would come out unprefixed.
+      # npm pack is offline, so no registry configuration is needed here.
+      - name: Pack with bundled npm 2.15.1 (package/ prefix via mount path)
+        run: |
+          set -e
+          docker run --rm -v "$PWD":/w/package -w /w/package node:0.10-wheezy npm pack
+
+      - name: Inspect tarball
+        run: |
+          set -e
+          ls -l jquery-1.11.1.tgz && tar tzf jquery-1.11.1.tgz | head -40
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: jquery-1.11.1.tgz

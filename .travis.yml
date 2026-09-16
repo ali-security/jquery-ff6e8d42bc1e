@@ -1,3 +1,22 @@
 language: node_js
 node_js:
 - '0.10'
+addons:
+  chrome: stable
+before_script:
+# The QUnit ajax tests request .php endpoints under test/data, so the suite has
+# to be served by a PHP-capable server rather than a static one.
+- sudo apt-get update -qq
+- sudo apt-get install -y php-cli
+script:
+# The project's own leg, unchanged: build + lint on the release-era Node.
+- npm test
+# jQuery 1.11.1 predates any headless test task -- upstream ran the QUnit suite
+# through TestSwarm on real browsers. test/qunit-run.js drives headless Chrome
+# over the DevTools protocol instead, so the suite actually executes in CI.
+- php -S 127.0.0.1:8000 -t . > /tmp/php-server.log 2>&1 &
+- sleep 3
+- curl -sf -o /dev/null http://127.0.0.1:8000/test/index.html
+# The runner needs a modern Node; the grunt build above already ran on 0.10. Node 22 for the global WebSocket the runner needs.
+- nvm install 22
+- node test/qunit-run.js http://127.0.0.1:8000/test/index.html /usr/bin/google-chrome
